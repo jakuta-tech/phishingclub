@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/enetx/g"
 	"github.com/enetx/surf"
 	"github.com/phishingclub/phishingclub/service"
 )
@@ -95,6 +96,15 @@ func (m *ProxyHandler) createSurfClient(userAgent string, proxyConfig *service.P
 			m.logger.Debugw("applying default windows platform impersonation", "userAgent", userAgent)
 		}
 
+		// KNOWN BUG (surf impersonation, upstream utls): the impersonation
+		// profiles are unstable in the current surf/utls versions.
+		//   - Firefox: the handshake fails with "tls: invalid server key share"
+		//     against many targets, so the Firefox profile is effectively broken.
+		//   - Chrome: works most of the time but the per connection ClientHello
+		//     extension shuffle occasionally produces a hello the target resets,
+		//     so a request can intermittently fail to connect.
+		// Impersonation is off by default. The non impersonated client is
+		// reliable and still uses HTTP/2. Revisit when surf/utls is updated.
 		// apply browser impersonation based on detected profile
 		switch {
 		case profile.isChrome || profile.isEdge:
@@ -102,8 +112,9 @@ func (m *ProxyHandler) createSurfClient(userAgent string, proxyConfig *service.P
 			builder = impersonate.Chrome()
 			m.logger.Debugw("applying chrome browser impersonation")
 		case profile.isFirefox:
-			// firefox impersonation
-			builder = impersonate.FireFox()
+			// firefox impersonation. see KNOWN BUG above: the firefox profile
+			// currently fails the tls handshake with invalid server key share
+			builder = impersonate.Firefox()
 			m.logger.Debugw("applying firefox browser impersonation")
 		case profile.isSafari:
 			// safari uses webkit - default to chrome for now as surf doesn't have safari profile
@@ -126,9 +137,13 @@ func (m *ProxyHandler) createSurfClient(userAgent string, proxyConfig *service.P
 	// configure timeout
 	builder = builder.Timeout(30 * time.Second)
 
-	// note: surf automatically decompresses response bodies via decodeBodyMW middleware
-	// even when using .Std(), but keeps the Content-Encoding header
-	// our proxy code will detect this and remove the header before sending to client
+	// disable surf's response decompression. surf decodes eagerly: it builds the
+	// gzip reader as soon as the headers arrive, so a response that advertises
+	// Content-Encoding with an empty body (a 302 redirect from the login flow, a
+	// 304, a 204) makes the gzip reader read from an empty stream and return EOF,
+	// which surf surfaces as the whole request failing. readAndDecompressBody
+	// decompresses from the fully buffered body instead and handles empty bodies.
+	builder = builder.DisableCompression()
 
 	// preserve client's accept-language header if provided
 	if acceptLanguage != "" {
@@ -141,17 +156,20 @@ func (m *ProxyHandler) createSurfClient(userAgent string, proxyConfig *service.P
 		if err != nil {
 			return nil, err
 		}
-		builder = builder.Proxy(proxyURL.String())
+		builder = builder.Proxy(g.String(proxyURL.String()))
 		m.logger.Debugw("configured surf client with proxy",
 			"proxy", proxyURL.String(),
 		)
 	}
 
 	// build the client
-	client := builder.Build()
+	result := builder.Build()
+	if result.IsErr() {
+		return nil, result.Err()
+	}
 
 	// convert surf client to standard http.Client for compatibility
-	return client.Std(), nil
+	return result.Ok().Std(), nil
 }
 
 // createHTTPClientWithImpersonation creates surf http client with optional impersonation

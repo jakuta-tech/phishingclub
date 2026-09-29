@@ -212,6 +212,8 @@ func (s *SMTPConfiguration) SendTestEmail(
 		s.Logger.Errorw("failed to set envelope from", "error", err)
 		return err
 	}
+	// message id from the sending domain so the host is not leaked
+	setMessageIDFromAddress(m, from.String())
 	// headers
 	err = m.From(from.String())
 	if err != nil {
@@ -241,6 +243,19 @@ func (s *SMTPConfiguration) SendTestEmail(
 				// MinVersion:         tls.VersionTLS12,
 			},
 		),
+	}
+	// port 465 speaks implicit TLS (SMTPS): the connection is wrapped in
+	// TLS on connect instead of being upgraded later via STARTTLS. go-mail
+	// ignores the TLS policy while SSL is on.
+	if smtpPort.Int() == 465 {
+		emailOptions = append(emailOptions, mail.WithSSL())
+	}
+	// use a custom HELO/EHLO hostname when set, otherwise go-mail
+	// falls back to the machine hostname
+	if helo, err := smtpConfig.Helo.Get(); err == nil {
+		if h := helo.String(); len(h) > 0 {
+			emailOptions = append(emailOptions, mail.WithHELO(h))
+		}
 	}
 	// setup authentication if provided
 	username, err := smtpConfig.Username.Get()
@@ -454,6 +469,9 @@ func (s *SMTPConfiguration) UpdateByID(
 	if v, err := incoming.IgnoreCertErrors.Get(); err == nil {
 		current.IgnoreCertErrors.Set(v)
 	}
+	if v, err := incoming.Helo.Get(); err == nil {
+		current.Helo.Set(v)
+	}
 	if err := incoming.Validate(); err != nil {
 		s.Logger.Errorw("failed to update SMTP configuration", "error", err)
 		return err
@@ -655,6 +673,19 @@ func (s *SMTPConfiguration) SendMessages(
 				InsecureSkipVerify: smtpIgnoreCertErrors,
 			},
 		),
+	}
+	// port 465 speaks implicit TLS (SMTPS): the connection is wrapped in
+	// TLS on connect instead of being upgraded later via STARTTLS. go-mail
+	// ignores the TLS policy while SSL is on.
+	if smtpPort.Int() == 465 {
+		emailOptions = append(emailOptions, mail.WithSSL())
+	}
+	// use a custom HELO/EHLO hostname when set, otherwise go-mail
+	// falls back to the machine hostname
+	if helo, err := smtpConfig.Helo.Get(); err == nil {
+		if h := helo.String(); len(h) > 0 {
+			emailOptions = append(emailOptions, mail.WithHELO(h))
+		}
 	}
 	username, err := smtpConfig.Username.Get()
 	if err != nil {

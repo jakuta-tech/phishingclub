@@ -532,6 +532,19 @@ func (m *Email) SendTestEmail(
 			},
 		),
 	}
+	// port 465 speaks implicit TLS (SMTPS): the connection is wrapped in
+	// TLS on connect instead of being upgraded later via STARTTLS. go-mail
+	// ignores the TLS policy while SSL is on.
+	if smtpPort.Int() == 465 {
+		emailOptions = append(emailOptions, mail.WithSSL())
+	}
+	// use a custom HELO/EHLO hostname when set, otherwise go-mail
+	// falls back to the machine hostname
+	if helo, err := smtp.Helo.Get(); err == nil {
+		if h := helo.String(); len(h) > 0 {
+			emailOptions = append(emailOptions, mail.WithHELO(h))
+		}
+	}
 	// setup authentication if provided
 	username, err := smtp.Username.Get()
 	if err != nil {
@@ -569,6 +582,8 @@ func (m *Email) SendTestEmail(
 		m.Logger.Errorw("failed to set envelope from", "error", err)
 		return errs.Wrap(err)
 	}
+	// message id from the sending domain so the host is not leaked
+	setMessageIDFromAddress(msg, email.MailEnvelopeFrom.MustGet().String())
 	// headers
 	err = msg.From(email.MailHeaderFrom.MustGet().String())
 	if err != nil {

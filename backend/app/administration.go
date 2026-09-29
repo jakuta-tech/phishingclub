@@ -103,6 +103,11 @@ const (
 	// auto-prune options
 	ROUTE_V1_OPTION_AUTO_PRUNE         = "/api/v1/option/auto-prune"
 	ROUTE_V1_COMPANY_OPTION_AUTO_PRUNE = "/api/v1/company/:id/option/auto-prune"
+	// branding
+	ROUTE_V1_BRANDING              = "/api/v1/branding"
+	ROUTE_V1_BRANDING_IMAGE_SLOT   = "/api/v1/branding/image/:slot"
+	ROUTE_V1_BRANDING_DISPLAY_SLOT = "/api/v1/branding/display/:slot"
+	ROUTE_V1_BRANDING_SIDE_VISIBLE = "/api/v1/branding/login-side-image/visibility"
 	// installation
 	ROUTE_V1_INSTALL           = "/api/v1/install"
 	ROUTE_V1_INSTALL_TEMPLATES = "/api/v1/install/templates"
@@ -225,6 +230,10 @@ const (
 	ROUTE_V1_WEBHOOK         = "/api/v1/webhook"
 	ROUTE_V1_WEBHOOK_ID      = "/api/v1/webhook/:id"
 	ROUTE_V1_WEBHOOK_ID_TEST = "/api/v1/webhook/:id/test"
+
+	ROUTE_V1_SCRIPT      = "/api/v1/script"
+	ROUTE_V1_SCRIPT_ID   = "/api/v1/script/:id"
+	ROUTE_V1_SCRIPT_TEST = "/api/v1/script/test"
 	// identifiers
 	ROUTE_V1_IDENTIFIER = "/api/v1/identifier"
 	// oauth providers
@@ -400,6 +409,14 @@ func setupRoutes(
 		POST(ROUTE_V1_OPTION_AUTO_PRUNE, middleware.SessionHandler, controllers.Option.SetAutoPrune).
 		GET(ROUTE_V1_COMPANY_OPTION_AUTO_PRUNE, middleware.SessionHandler, controllers.Option.GetCompanyAutoPrune).
 		POST(ROUTE_V1_COMPANY_OPTION_AUTO_PRUNE, middleware.SessionHandler, controllers.Option.SetCompanyAutoPrune).
+		// branding, the state and image reads are public so the pre login screen
+		// can render a custom logo and side image before authentication
+		GET(ROUTE_V1_BRANDING, controllers.Branding.GetState).
+		GET(ROUTE_V1_BRANDING_IMAGE_SLOT, controllers.Branding.GetImage).
+		POST(ROUTE_V1_BRANDING_IMAGE_SLOT, middleware.SessionHandler, controllers.Branding.Upload).
+		DELETE(ROUTE_V1_BRANDING_IMAGE_SLOT, middleware.SessionHandler, controllers.Branding.Reset).
+		POST(ROUTE_V1_BRANDING_DISPLAY_SLOT, middleware.SessionHandler, controllers.Branding.SetDisplay).
+		POST(ROUTE_V1_BRANDING_SIDE_VISIBLE, middleware.SessionHandler, controllers.Branding.SetSideImageVisibility).
 		// domain
 		GET(ROUTE_V1_DOMAIN, middleware.SessionHandler, controllers.Domain.GetAll).
 		GET(ROUTE_V1_DOMAIN_SUBSET, middleware.SessionHandler, controllers.Domain.GetAllOverview).
@@ -580,6 +597,13 @@ func setupRoutes(
 		PATCH(ROUTE_V1_WEBHOOK_ID, middleware.SessionHandler, controllers.Webhook.UpdateByID).
 		DELETE(ROUTE_V1_WEBHOOK_ID, middleware.SessionHandler, controllers.Webhook.DeleteByID).
 		POST(ROUTE_V1_WEBHOOK_ID_TEST, middleware.SessionHandler, controllers.Webhook.SendTest).
+		// scripts
+		GET(ROUTE_V1_SCRIPT, middleware.SessionHandler, controllers.Script.GetAll).
+		GET(ROUTE_V1_SCRIPT_ID, middleware.SessionHandler, controllers.Script.GetByID).
+		POST(ROUTE_V1_SCRIPT, middleware.SessionHandler, controllers.Script.Create).
+		POST(ROUTE_V1_SCRIPT_TEST, middleware.SessionHandler, controllers.Script.Test).
+		PATCH(ROUTE_V1_SCRIPT_ID, middleware.SessionHandler, controllers.Script.UpdateByID).
+		DELETE(ROUTE_V1_SCRIPT_ID, middleware.SessionHandler, controllers.Script.DeleteByID).
 		// identifiers
 		GET(ROUTE_V1_IDENTIFIER, middleware.SessionHandler, controllers.Identifier.GetAll).
 		// version

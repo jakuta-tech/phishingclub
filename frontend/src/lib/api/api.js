@@ -595,6 +595,7 @@ export class API {
 			denyPageID,
 			evasionPageID,
 			webhooks,
+			scripts,
 			constraintWeekDays,
 			constraintStartTime,
 			constraintEndTime,
@@ -623,6 +624,7 @@ export class API {
 				denyPageID,
 				evasionPageID,
 				webhooks,
+				scripts,
 				constraintWeekDays,
 				constraintStartTime,
 				constraintEndTime,
@@ -683,6 +685,7 @@ export class API {
 			denyPageID,
 			evasionPageID,
 			webhooks,
+			scripts,
 			constraintWeekDays,
 			constraintStartTime,
 			constraintEndTime,
@@ -710,6 +713,7 @@ export class API {
 				denyPageID,
 				evasionPageID,
 				webhooks,
+				scripts,
 				constraintWeekDays,
 				constraintStartTime,
 				constraintEndTime,
@@ -2012,6 +2016,7 @@ export class API {
 		 * @param {string} configuration.username
 		 * @param {string} configuration.password
 		 * @param {boolean} configuration.ignoreCertErrors
+		 * @param {string} configuration.helo
 		 * @param {string} configuration.companyID
 		 * @returns
 		 */
@@ -2030,6 +2035,7 @@ export class API {
 		 * @param {string} configuration.username
 		 * @param {string} configuration.password
 		 * @param {boolean} configuration.ignoreCertErrors
+		 * @param {string} configuration.helo
 		 * @param {string} configuration.companyID
 		 * @returns {Promise<ApiResponse>}
 		 */
@@ -3356,6 +3362,96 @@ export class API {
 	};
 
 	/**
+	 * script is the API for script related operations.
+	 * Scripts attach to a campaign like webhooks but run a script.
+	 */
+	script = {
+		/**
+		 * Create a new script.
+		 *
+		 * @param {Object} script
+		 * @param {string} script.name
+		 * @param {string} script.script
+		 * @param {string} [script.companyID]
+		 * @returns {Promise<ApiResponse>}
+		 */
+		create: async ({ name, script, companyID }) => {
+			return await postJSON(this.getPath('/script'), {
+				name: name,
+				script: script,
+				// send null (global scope) rather than an empty string, which the
+				// backend would try to parse as a UUID
+				companyID: companyID || null
+			});
+		},
+
+		/**
+		 * GetAll scripts.
+		 *
+		 * @param {TableURLParams} options
+		 * @param {string|null} companyID
+		 * @returns {Promise<ApiResponse>}
+		 */
+		getAll: async (options, companyID = null) => {
+			return await getJSON(
+				this.getPath(`/script?${appendQuery(options)}${this.appendCompanyQuery(companyID)}`)
+			);
+		},
+
+		/**
+		 * Get a script by its ID.
+		 *
+		 * @param {string} id
+		 * @returns {Promise<ApiResponse>}
+		 */
+		getByID: async (id) => {
+			return await getJSON(this.getPath(`/script/${id}`));
+		},
+
+		/**
+		 * Update a script.
+		 *
+		 * @param {Object} script
+		 * @param {string} script.id
+		 * @param {string} script.name
+		 * @param {string} script.script
+		 * @param {string} [script.companyID]
+		 * @returns {Promise<ApiResponse>}
+		 */
+		update: async ({ id, name, script, companyID }) => {
+			return await patchJSON(this.getPath(`/script/${id}`), {
+				name: name,
+				script: script,
+				companyID: companyID || null
+			});
+		},
+
+		/**
+		 * Delete a script by its ID.
+		 *
+		 * @param {string} id
+		 * @returns {Promise<ApiResponse>}
+		 */
+		delete: async (id) => {
+			return await deleteJSON(this.getPath(`/script/${id}`));
+		},
+
+		/**
+		 * Test-run a script against a simulated campaign event. Captures what the
+		 * script does (logs, info/emitEvent, fetches, errors) without touching a
+		 * campaign.
+		 *
+		 * @param {Object} args
+		 * @param {string} args.script
+		 * @param {Object} args.event
+		 * @returns {Promise<ApiResponse>}
+		 */
+		test: async ({ script, event }) => {
+			return await postJSON(this.getPath('/script/test'), { script, event });
+		}
+	};
+
+	/**
 	 * identifier is for campaign identifiers, ala. 'rid' in gophish
 	 */
 	identifier = {
@@ -3415,6 +3511,65 @@ export class API {
 		 */
 		get: async () => {
 			return await getJSON(this.getPath(`/version`));
+		}
+	};
+
+	/**
+	 * branding is the API for install wide UI branding. The state and image
+	 * reads are public so the login screen can render a custom logo and side
+	 * image before the user is authenticated.
+	 */
+	branding = {
+		/**
+		 * @returns {Promise<ApiResponse>}
+		 */
+		getState: async () => {
+			return await getJSON(this.getPath(`/branding`));
+		},
+		/**
+		 * imageURL returns the public URL for a branding slot image. An optional
+		 * version keeps the header and login screen in sync right after an upload
+		 * by busting the browser cache.
+		 * @param {string} slot
+		 * @param {number|string} [version]
+		 * @returns {string}
+		 */
+		imageURL: (slot, version) => {
+			const path = this.getPath(`/branding/image/${slot}`);
+			return version ? `${path}?v=${version}` : path;
+		},
+		/**
+		 * @param {string} slot
+		 * @param {File} file
+		 * @returns {Promise<ApiResponse>}
+		 */
+		upload: async (slot, file) => {
+			const formData = new FormData();
+			formData.append('file', file);
+			return await postMultipart(this.getPath(`/branding/image/${slot}`), formData);
+		},
+		/**
+		 * @param {string} slot
+		 * @returns {Promise<ApiResponse>}
+		 */
+		reset: async (slot) => {
+			return await deleteReq(this.getPath(`/branding/image/${slot}`));
+		},
+		/**
+		 * @param {boolean} hidden
+		 * @returns {Promise<ApiResponse>}
+		 */
+		setSideImageHidden: async (hidden) => {
+			return await postJSON(this.getPath(`/branding/login-side-image/visibility`), { hidden });
+		},
+		/**
+		 * setDisplay stores how an image is fitted within its area.
+		 * @param {string} slot
+		 * @param {{fit:string, scale:number, background:string, positionX:string, positionY:string}} display
+		 * @returns {Promise<ApiResponse>}
+		 */
+		setDisplay: async (slot, display) => {
+			return await postJSON(this.getPath(`/branding/display/${slot}`), display);
 		}
 	};
 

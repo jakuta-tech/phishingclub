@@ -30,6 +30,8 @@ type Company struct {
 	CampaignTemplate         *CampaignTemplate
 	AllowDenyService         *AllowDeny
 	WebhookService           *Webhook
+	ScriptService            *Script
+	AssetService             *Asset
 	CompanyRepository        *repository.Company
 }
 
@@ -299,6 +301,17 @@ func (s *Company) DeleteByID(
 			return 0, errs.Wrap(err)
 		}
 	}
+	// delete the company shared assets, these have no domain so the domain
+	// deletion above does not cover them
+	err = s.AssetService.DeleteAllByCompanyID(
+		g,
+		session,
+		companyID,
+	)
+	if err != nil {
+		s.Logger.Errorw("failed to delete shared assets related to company", "error", err)
+		return 0, errs.Wrap(err)
+	}
 	// delete pages, this also cancels campaings and remove relations that use them
 	affectedPages, err := s.PageService.GetByCompanyID(
 		g,
@@ -450,6 +463,32 @@ func (s *Company) DeleteByID(
 		)
 		if err != nil {
 			s.Logger.Errorw("failed to delete webhooks related to company", "error", err)
+			return 0, errs.Wrap(err)
+		}
+	}
+
+	// delete scripts
+	affectedScripts, err := s.ScriptService.GetByCompanyID(
+		g,
+		session,
+		companyID,
+	)
+	if err != nil {
+		s.Logger.Errorw(
+			"failed get scripts that should be deleted due to company deletion",
+			"error", err,
+		)
+		return 0, errs.Wrap(err)
+	}
+	for _, script := range affectedScripts {
+		scriptID := script.ID.MustGet()
+		err = s.ScriptService.DeleteByID(
+			g,
+			session,
+			&scriptID,
+		)
+		if err != nil {
+			s.Logger.Errorw("failed to delete scripts related to company", "error", err)
 			return 0, errs.Wrap(err)
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"github.com/phishingclub/phishingclub/script"
 	"github.com/phishingclub/phishingclub/service"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -48,6 +49,11 @@ type Services struct {
 	Scim                *service.Scim
 	RemoteBrowser       *service.RemoteBrowser
 	ReportTemplate      *service.ReportTemplate
+	Branding            *service.Branding
+	Script              *service.Script
+	// ScriptDispatcher is the worker pool for event triggered scripts, exposed so
+	// graceful shutdown can drain in flight jobs. Nil when the feature is disabled.
+	ScriptDispatcher *script.Dispatcher
 }
 
 // NewServices creates a collection of services
@@ -65,9 +71,23 @@ func NewServices(
 	filePath string,
 	trustedProxies []string,
 	remoteBrowserExecPath string,
+	brandingPath string,
+	scriptEnabled bool,
 ) *Services {
 	common := service.Common{
 		Logger: logger,
+	}
+	// the script dispatcher only exists when the feature is enabled at the
+	// server level. When nil the campaign service skips script dispatch.
+	var scriptDispatcher *script.Dispatcher
+	if scriptEnabled {
+		scriptDispatcher = script.NewDispatcher(
+			logger,
+			script.DefaultWorkers,
+			script.DefaultQueueSize,
+			script.DefaultTimeout,
+		)
+		scriptDispatcher.Start()
 	}
 	microsoftDeviceCodeService := &service.MicrosoftDeviceCode{
 		Common:                        common,
@@ -147,6 +167,21 @@ func NewServices(
 		CampaignRepository: repositories.Campaign,
 		WebhookRepository:  repositories.Webhook,
 	}
+	// a standalone runner powers the editor test panel (capture mode)
+	var scriptTestRunner *script.Runner
+	if scriptEnabled {
+		scriptTestRunner = &script.Runner{
+			Logger:     logger,
+			HTTPClient: &http.Client{Timeout: 30 * time.Second},
+			Timeout:    30 * time.Second,
+		}
+	}
+	scriptSvc := &service.Script{
+		Common:             common,
+		CampaignRepository: repositories.Campaign,
+		ScriptRepository:   repositories.Script,
+		TestRunner:         scriptTestRunner,
+	}
 
 	campaignTemplate := &service.CampaignTemplate{
 		Common:                     common,
@@ -225,6 +260,8 @@ func NewServices(
 		RecipientGroupRepository:      repositories.RecipientGroup,
 		AllowDenyRepository:           repositories.AllowDeny,
 		WebhookRepository:             repositories.Webhook,
+		ScriptRepository:              repositories.Script,
+		ScriptDispatcher:              scriptDispatcher,
 		CampaignTemplateService:       campaignTemplate,
 		DomainService:                 domain,
 		RecipientService:              recipient,
@@ -267,6 +304,8 @@ func NewServices(
 		CampaignTemplate:         campaignTemplate,
 		AllowDenyService:         allowDeny,
 		WebhookService:           webhook,
+		ScriptService:            scriptSvc,
+		AssetService:             asset,
 		CompanyRepository:        repositories.Company,
 	}
 	versionService := &service.Version{Common: common}
@@ -331,6 +370,13 @@ func NewServices(
 		ReportSendLogRepository:       repositories.ReportSendLog,
 	}
 
+	brandingService := &service.Branding{
+		Common:           common,
+		RootFolder:       brandingPath,
+		OptionRepository: repositories.Option,
+		FileService:      file,
+	}
+
 	return &Services{
 		CompanyScimConfig:   companyScimConfig,
 		CompanyReportConfig: companyReportConfig,
@@ -368,5 +414,8 @@ func NewServices(
 		MicrosoftDeviceCode: microsoftDeviceCodeService,
 		RemoteBrowser:       remoteBrowser,
 		ReportTemplate:      reportTemplate,
+		Branding:            brandingService,
+		Script:              scriptSvc,
+		ScriptDispatcher:    scriptDispatcher,
 	}
 }

